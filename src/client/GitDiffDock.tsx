@@ -310,7 +310,11 @@ export function GitDiffDock(props: GitDiffDockProps) {
     <div className="dgdDock">
       <Tooltip label={t('button')} side="top" delayMs={500}>
         <button type="button" className="dgdLauncher" onClick={() => { setOpen(true); setSent(false) }} aria-label={t('button')} title={t('button')}>
-          <img className="dgdLauncherIcon" src={gitDiffToolbarIcon} alt="" aria-hidden="true" />
+          <span
+            className="dgdLauncherIcon"
+            aria-hidden="true"
+            style={{ '--dgd-icon-mask': `url(${gitDiffToolbarIcon})` } as React.CSSProperties}
+          />
           <span className="dgdLauncherLabel">Git Diff</span>
         </button>
       </Tooltip>
