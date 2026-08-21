@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { alignDiff, parseStatus } from '../src/host/diff-service.js'
+import { alignDiff, parseStatus, parseSubmodulePaths } from '../src/host/diff-service.js'
 
 describe('alignDiff', () => {
   it('aligns replacement rows into an integrated red-green pair', () => {
@@ -29,5 +29,15 @@ describe('parseStatus', () => {
     expect(parseStatus('R  new name.ts\0old name.ts\0')).toEqual([
       { path: 'new name.ts', oldPath: 'old name.ts', status: 'renamed' },
     ])
+  })
+})
+
+describe('parseSubmodulePaths', () => {
+  it('parses paths including whitespace from git config output', () => {
+    expect(parseSubmodulePaths([
+      'submodule.src/vue3-common.path src/vue3-common',
+      'submodule.packages/nested.path packages/a nested/module',
+      '',
+    ].join('\n'))).toEqual(['src/vue3-common', 'packages/a nested/module'])
   })
 })

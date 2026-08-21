@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { IconCodeOutline16, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { DiffFile, DiffLine, ReviewAnnotation } from '../core/types.js'
+import type { DiffFile, DiffLine, DiffRepository, ReviewAnnotation } from '../core/types.js'
 import type { GitDiffLocaleKey } from './locales.js'
 import { readDiff } from './api.js'
 
@@ -26,6 +26,70 @@ function lineClass(line: DiffLine): string {
   if (line.kind === 'modify') return line.partnerKind === 'delete' ? 'dgdModifyDelete' : 'dgdModifyInsert'
   if (line.kind === 'empty') return 'dgdEmpty'
   return 'dgdEqual'
+}
+
+function RepositoryTree({ repository, activePath, expanded, onToggle, onSelect, t, depth = 0 }: {
+  repository: DiffRepository
+  activePath: string | null
+  expanded: ReadonlySet<string>
+  onToggle: (path: string) => void
+  onSelect: (path: string) => void
+  t: GitDiffDockProps['t']
+  depth?: number
+}) {
+  const root = repository.path === ''
+  const open = root || expanded.has(repository.path)
+  const changedCount = countRepositoryChanges(repository)
+  return (
+    <div className="dgdTreeNode">
+      {!root && <button
+        className="dgdRepository"
+        type="button"
+        onClick={() => onToggle(repository.path)}
+        style={{ paddingLeft: `${10 + depth * 14}px` }}
+        title={repository.path}
+        aria-expanded={open}
+      >
+        <span className="dgdChevron" aria-hidden="true">{open ? '⌄' : '›'}</span>
+        <span aria-hidden="true">▣</span>
+        <span className="dgdRepositoryName">{repository.name}</span>
+        {!repository.initialized && <span className="dgdSubmoduleState">未初始化</span>}
+        {repository.headChanged && <span className="dgdSubmoduleState">指针变动</span>}
+        <span className="dgdTreeCount">{changedCount}</span>
+      </button>}
+      {open && <div>
+        {repository.files.map(file => (
+          <button
+            className={`dgdFile ${file.path === activePath ? 'dgdFileActive' : ''}`}
+            type="button"
+            key={file.path}
+            onClick={() => onSelect(file.path)}
+            title={file.path}
+            style={{ paddingLeft: `${10 + (root ? 0 : depth + 1) * 14}px` }}
+          >
+            <span className="dgdStatus">{t(STATUS_KEYS[file.status])}</span>
+            <span className="dgdPath">{file.repositoryRelativePath}</span>
+          </button>
+        ))}
+        {repository.children.map(child => <RepositoryTree
+          key={child.path}
+          repository={child}
+          activePath={activePath}
+          expanded={expanded}
+          onToggle={onToggle}
+          onSelect={onSelect}
+          t={t}
+          depth={root ? 0 : depth + 1}
+        />)}
+      </div>}
+    </div>
+  )
+}
+
+function countRepositoryChanges(repository: DiffRepository): number {
+  return repository.files.length
+    + (repository.headChanged ? 1 : 0)
+    + repository.children.reduce((sum, child) => sum + countRepositoryChanges(child), 0)
 }
 
 function SelectedFileHeader({ file, t }: { file: DiffFile, t: GitDiffDockProps['t'] }) {
@@ -107,6 +171,8 @@ export function GitDiffDock(props: GitDiffDockProps) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [files, setFiles] = useState<readonly DiffFile[]>([])
+  const [repository, setRepository] = useState<DiffRepository | null>(null)
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [activePath, setActivePath] = useState<string | null>(null)
   const [selection, setSelection] = useState<SelectedCode | null>(null)
   const [comment, setComment] = useState('')
@@ -125,6 +191,10 @@ export function GitDiffDock(props: GitDiffDockProps) {
     if (!result.ok) setError(result.error.message)
     else {
       setFiles(result.value.files)
+      setRepository(result.value.repository)
+      setExpanded(current => current.size === 0
+        ? new Set(result.value.repository.children.filter(child => countRepositoryChanges(child) > 0).map(child => child.path))
+        : current)
       setActivePath(current => result.value.files.some(file => file.path === current) ? current : result.value.files[0]?.path ?? null)
     }
     setLoading(false)
@@ -212,11 +282,18 @@ export function GitDiffDock(props: GitDiffDockProps) {
             </header>
             <div className="dgdBody">
               <aside className="dgdFiles">
-                {files.map(file => (
-                  <button className={`dgdFile ${file.path === activeFile?.path ? 'dgdFileActive' : ''}`} type="button" key={file.path} onClick={() => setActivePath(file.path)} title={file.path}>
-                    <span className="dgdStatus">{t(STATUS_KEYS[file.status])}</span><span className="dgdPath">{file.path}</span>
-                  </button>
-                ))}
+                {repository !== null && <RepositoryTree
+                  repository={repository}
+                  activePath={activeFile?.path ?? null}
+                  expanded={expanded}
+                  onToggle={path => setExpanded(current => {
+                    const next = new Set(current)
+                    next.has(path) ? next.delete(path) : next.add(path)
+                    return next
+                  })}
+                  onSelect={setActivePath}
+                  t={t}
+                />}
               </aside>
               <main className="dgdMain">
                 {loading ? <div className="dgdCenter">{t('loading')}</div>

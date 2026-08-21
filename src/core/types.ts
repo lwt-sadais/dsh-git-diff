@@ -20,7 +20,12 @@ export interface ChangeMarker {
 }
 
 export interface DiffFile {
+  /** Path relative to the top-level workspace (globally unique in this snapshot). */
   readonly path: string
+  /** Path relative to the repository that owns this file. */
+  readonly repositoryRelativePath: string
+  /** Owning repository path relative to the top-level workspace; empty for root. */
+  readonly repositoryPath: string
   readonly oldPath: string | null
   readonly status: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked'
   readonly binary: boolean
@@ -31,10 +36,24 @@ export interface DiffFile {
   readonly markers: readonly ChangeMarker[]
 }
 
+export interface DiffRepository {
+  /** Repository path relative to the top-level workspace; empty for root. */
+  readonly path: string
+  readonly name: string
+  readonly initialized: boolean
+  /** The parent repository records a changed gitlink commit for this submodule. */
+  readonly headChanged: boolean
+  readonly files: readonly DiffFile[]
+  readonly children: readonly DiffRepository[]
+}
+
 export interface DiffResponse {
   readonly root: string
   readonly generatedAt: string
+  /** Flat compatibility/index list, including files from every initialized repository. */
   readonly files: readonly DiffFile[]
+  /** Root repository and recursively nested submodule repositories. */
+  readonly repository: DiffRepository
 }
 
 export interface ApiError {
