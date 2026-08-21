@@ -272,6 +272,7 @@ export function GitDiffDock(props: GitDiffDockProps) {
       <Tooltip label={t('button')} side="top" delayMs={500}>
         <button type="button" className="dgdLauncher" onClick={() => { setOpen(true); setSent(false) }} aria-label={t('button')} title={t('button')}>
           <img className="dgdLauncherIcon" src={gitDiffToolbarIcon} alt="" aria-hidden="true" />
+          <span className="dgdLauncherLabel">Git Diff</span>
         </button>
       </Tooltip>
       {open && createPortal(
