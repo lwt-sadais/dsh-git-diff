@@ -1,4 +1,5 @@
-import { readFile, realpath } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { lstat, readFile, realpath } from 'node:fs/promises'
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path'
 import { diffLines } from 'diff'
 import type {
@@ -6,6 +7,8 @@ import type {
   ApiResult,
   ChangeMarker,
   DiffFile,
+  DiffFileRequest,
+  DiffFileSummary,
   DiffLine,
   DiffRepository,
   DiffResponse,
@@ -15,6 +18,8 @@ import type {
 const MAX_FILE_BYTES = 2 * 1024 * 1024
 const MAX_TOTAL_BYTES = 16 * 1024 * 1024
 const MAX_REPOSITORIES = 128
+const MAX_MANIFESTS = 8
+const MANIFEST_TTL_MS = 5 * 60_000
 const EMPTY_LINE: DiffLine = { kind: 'empty', text: '', lineNumber: null }
 
 export interface GitRunResult {
@@ -38,8 +43,19 @@ export interface StatusEntry {
 }
 
 interface SnapshotBudget {
-  bytes: number
   repositories: number
+}
+
+interface ManifestEntry {
+  readonly summary: DiffFileSummary
+  readonly repositoryRoot: string
+  readonly sourcePath: string
+}
+
+interface StoredManifest {
+  readonly workspace: string
+  readonly expiresAt: number
+  readonly files: ReadonlyMap<string, ManifestEntry>
 }
 
 function fail(code: ApiError['code'], message: string): ApiResult<never> {
@@ -58,7 +74,7 @@ function line(kind: DiffLine['kind'], text: string, lineNumber: number, partnerK
 }
 
 export function alignDiff(before: string, after: string): { rows: readonly DiffRow[], markers: readonly ChangeMarker[] } {
-  const chunks = diffLines(before, after, { newlineIsToken: false })
+  const chunks = diffLines(before, after, { newlineIsToken: false, stripTrailingCr: true })
   const rows: DiffRow[] = []
   const markers: ChangeMarker[] = []
   let beforeLine = 1
@@ -150,17 +166,20 @@ function isBinary(content: string): boolean {
   return content.includes('\0')
 }
 
-function flatten(repository: DiffRepository): DiffFile[] {
+function flatten(repository: DiffRepository): DiffFileSummary[] {
   return [...repository.files, ...repository.children.flatMap(flatten)]
 }
 
 export class DiffService {
   constructor(private readonly runner: GitRunner, private readonly gate: WorkspaceGate) {}
 
+  private readonly manifests = new Map<string, StoredManifest>()
+
   private async repositorySnapshot(
     absoluteRoot: string,
     repositoryPath: string,
     budget: SnapshotBudget,
+    entries: Map<string, ManifestEntry>,
     signal?: AbortSignal,
   ): Promise<DiffRepository> {
     signal?.throwIfAborted()
@@ -189,7 +208,7 @@ export class DiffService {
       }
       const headChanged = changedPaths.has(childRelativePath)
       if (initialized) {
-        const child = await this.repositorySnapshot(childRoot, childRepositoryPath, budget, signal)
+        const child = await this.repositorySnapshot(childRoot, childRepositoryPath, budget, entries, signal)
         children.push({ ...child, headChanged })
       } else {
         children.push({
@@ -206,50 +225,21 @@ export class DiffService {
     // A dirty gitlink appears in the parent status. Its internal files are owned
     // by the child node, so omit that synthetic parent row to avoid duplicates.
     const childPaths = new Set(declaredPaths)
-    const files: DiffFile[] = []
+    const files: DiffFileSummary[] = []
     for (const entry of statusEntries) {
       signal?.throwIfAborted()
-      if (childPaths.has(entry.path)) continue
-      const diskPath = safePath(absoluteRoot, entry.path)
-      if (diskPath === null) continue
-      let before = ''
-      let after = ''
-      let binary = false
-      let truncated = false
-
-      if (entry.status !== 'added' && entry.status !== 'untracked') {
-        const sourcePath = entry.oldPath ?? entry.path
-        const previous = await this.runner.run(['show', `HEAD:${sourcePath}`], absoluteRoot, signal)
-        if (previous.exitCode === 0) before = previous.stdout
-      }
-      if (entry.status !== 'deleted') {
-        try {
-          const buffer = await readFile(diskPath)
-          truncated = buffer.byteLength > MAX_FILE_BYTES
-          const bounded = truncated ? buffer.subarray(0, MAX_FILE_BYTES) : buffer
-          after = bounded.toString('utf8')
-          binary = bounded.includes(0)
-        } catch {
-          after = ''
-        }
-      }
-      binary ||= isBinary(before)
-      budget.bytes += Buffer.byteLength(before) + Buffer.byteLength(after)
-      if (budget.bytes > MAX_TOTAL_BYTES) throw new Error('snapshot byte limit exceeded')
-      const aligned = binary ? { rows: [], markers: [] } : alignDiff(before, after)
-      files.push({
+      if (childPaths.has(entry.path) || safePath(absoluteRoot, entry.path) === null) continue
+      const id = randomUUID()
+      const summary: DiffFileSummary = {
+        id,
         path: workspacePath(repositoryPath, entry.path),
         repositoryRelativePath: entry.path,
         repositoryPath,
         oldPath: entry.oldPath === null ? null : workspacePath(repositoryPath, entry.oldPath),
         status: entry.status,
-        binary,
-        truncated,
-        before,
-        after,
-        rows: aligned.rows,
-        markers: aligned.markers,
-      })
+      }
+      files.push(summary)
+      entries.set(id, { summary, repositoryRoot: absoluteRoot, sourcePath: entry.oldPath ?? entry.path })
     }
 
     return {
@@ -259,6 +249,54 @@ export class DiffService {
       headChanged: false,
       files,
       children,
+    }
+  }
+
+  async file(request: DiffFileRequest, signal?: AbortSignal): Promise<ApiResult<DiffFile>> {
+    const workspace = await this.gate.resolve(request.path)
+    if (!workspace.ok) return workspace
+    const manifest = this.manifests.get(request.manifestId)
+    if (manifest === undefined || manifest.expiresAt <= Date.now() || manifest.workspace !== workspace.value) {
+      this.manifests.delete(request.manifestId)
+      return fail('manifest-stale', 'Git diff manifest has expired; refresh local changes')
+    }
+    const entry = manifest.files.get(request.fileId)
+    if (entry === undefined) return fail('file-unknown', 'file is not present in this Git diff manifest')
+    const { summary, repositoryRoot, sourcePath } = entry
+    const diskPath = safePath(repositoryRoot, summary.repositoryRelativePath)
+    if (diskPath === null) return fail('file-unknown', 'file path is invalid')
+
+    try {
+      let before = ''
+      let after = ''
+      let binary = false
+      let truncated = false
+      if (summary.status !== 'added' && summary.status !== 'untracked') {
+        const previous = await this.runner.run(['show', `HEAD:${sourcePath}`], repositoryRoot, signal)
+        if (previous.exitCode !== 0) return fail('manifest-stale', 'Git baseline changed; refresh local changes')
+        before = previous.stdout
+      }
+      if (summary.status !== 'deleted') {
+        const stat = await lstat(diskPath)
+        if (!stat.isFile() || stat.isSymbolicLink()) return fail('file-unknown', 'changed path is not a regular file')
+        const canonicalFile = await realpath(diskPath)
+        const canonicalRelative = relative(repositoryRoot, canonicalFile)
+        if (canonicalRelative === '' || canonicalRelative === '..' || canonicalRelative.startsWith(`..${sep}`) || isAbsolute(canonicalRelative)) {
+          return fail('file-unknown', 'changed file resolves outside its repository')
+        }
+        const buffer = await readFile(canonicalFile)
+        truncated = buffer.byteLength > MAX_FILE_BYTES
+        const bounded = truncated ? buffer.subarray(0, MAX_FILE_BYTES) : buffer
+        after = bounded.toString('utf8')
+        binary = bounded.includes(0)
+      }
+      binary ||= isBinary(before)
+      if (Buffer.byteLength(before) + Buffer.byteLength(after) > MAX_TOTAL_BYTES) return fail('too-large', 'file diff exceeds the review limit')
+      const aligned = binary ? { rows: [], markers: [] } : alignDiff(before, after)
+      return { ok: true, value: { ...summary, binary, truncated, before, after, rows: aligned.rows, markers: aligned.markers } }
+    } catch (cause) {
+      if (cause instanceof Error && cause.name === 'AbortError') throw cause
+      return fail('manifest-stale', 'changed file is no longer available; refresh local changes')
     }
   }
 
@@ -278,12 +316,18 @@ export class DiffService {
     }
 
     try {
-      const repository = await this.repositorySnapshot(root, '', { bytes: 0, repositories: 0 }, signal)
+      const entries = new Map<string, ManifestEntry>()
+      const repository = await this.repositorySnapshot(root, '', { repositories: 0 }, entries, signal)
+      const manifestId = randomUUID()
+      const now = Date.now()
+      for (const [id, manifest] of this.manifests) if (manifest.expiresAt <= now) this.manifests.delete(id)
+      while (this.manifests.size >= MAX_MANIFESTS) this.manifests.delete(this.manifests.keys().next().value!)
+      this.manifests.set(manifestId, { workspace: root, expiresAt: now + MANIFEST_TTL_MS, files: entries })
       return {
         ok: true,
         value: {
-          root,
-          generatedAt: new Date().toISOString(),
+          manifestId,
+          generatedAt: new Date(now).toISOString(),
           files: flatten(repository),
           repository,
         },

@@ -3,10 +3,11 @@ import { createPortal } from 'react-dom'
 import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { gitDiffToolbarIcon } from './assets/git-diff-toolbar.js'
-import type { DiffFile, DiffLine, DiffRepository, ReviewAnnotation } from '../core/types.js'
+import type { DiffFile, DiffFileSummary, DiffLine, DiffRepository, ReviewAnnotation } from '../core/types.js'
 import type { GitDiffLocaleKey } from './locales.js'
-import { readDiff } from './api.js'
+import { readDiff, readDiffFile } from './api.js'
 import { filterRepositoryTree, fuzzyPathMatch } from './fuzzy-path.js'
+import { DIFF_ROW_HEIGHT, visibleRowRange } from './virtual-rows.js'
 
 export type GitDiffDockProps = PropsRuntime<'conversation.input.left'> & PropsLocale<'git-diff'>
 
@@ -108,7 +109,7 @@ function allRepositoryPaths(repository: DiffRepository): ReadonlySet<string> {
   return paths
 }
 
-function SelectedFileHeader({ file, t }: { file: DiffFile, t: GitDiffDockProps['t'] }) {
+function SelectedFileHeader({ file, t }: { file: DiffFileSummary, t: GitDiffDockProps['t'] }) {
   return (
     <div className="dgdSelectedFile" title={file.path}>
       <span className="dgdSelectedFileIcon" aria-hidden="true">‹/›</span>
@@ -126,18 +127,37 @@ function DiffPane({ file, side, paneRef, onScroll, onSelect }: {
   onScroll: () => void
   onSelect: () => void
 }) {
+  const [viewport, setViewport] = useState({ scrollTop: 0, height: 0 })
+  const range = visibleRowRange(file.rows.length, viewport.scrollTop, viewport.height)
+  const visibleRows = file.rows.slice(range.start, range.end)
+  const handleScroll = () => {
+    const pane = paneRef.current
+    if (pane !== null) setViewport({ scrollTop: pane.scrollTop, height: pane.clientHeight })
+    onScroll()
+  }
+  useEffect(() => {
+    const pane = paneRef.current
+    if (pane === null) return
+    const update = () => setViewport({ scrollTop: pane.scrollTop, height: pane.clientHeight })
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(pane)
+    return () => observer.disconnect()
+  }, [file.path, paneRef])
   return (
-    <div ref={paneRef} className="dgdPane" onScroll={onScroll} onMouseUp={onSelect} data-side={side}>
-      <div className="dgdRows">
-        {file.rows.map(row => {
-          const value = side === 'before' ? row.left : row.right
-          return (
-            <div className={`dgdLine ${lineClass(value)}`} key={row.index} data-row={row.index} data-line={value.lineNumber ?? ''}>
-              <span className="dgdLineNo">{value.lineNumber ?? ''}</span>
-              <span className="dgdCode">{value.text || ' '}</span>
-            </div>
-          )
-        })}
+    <div ref={paneRef} className="dgdPane" onScroll={handleScroll} onMouseUp={onSelect} data-side={side}>
+      <div className="dgdRows" style={{ height: `${file.rows.length * DIFF_ROW_HEIGHT}px`, position: 'relative' }}>
+        <div style={{ position: 'absolute', inset: `${range.start * DIFF_ROW_HEIGHT}px 0 auto 0` }}>
+          {visibleRows.map(row => {
+            const value = side === 'before' ? row.left : row.right
+            return (
+              <div className={`dgdLine ${lineClass(value)}`} key={row.index} data-row={row.index} data-line={value.lineNumber ?? ''}>
+                <span className="dgdLineNo">{value.lineNumber ?? ''}</span>
+                <span className="dgdCode">{value.text || ' '}</span>
+              </div>
+            )
+          })}
+        </div>
       </div>
     </div>
   )
@@ -186,8 +206,12 @@ export function GitDiffDock(props: GitDiffDockProps) {
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [files, setFiles] = useState<readonly DiffFile[]>([])
+  const [files, setFiles] = useState<readonly DiffFileSummary[]>([])
   const [repository, setRepository] = useState<DiffRepository | null>(null)
+  const [manifestId, setManifestId] = useState<string | null>(null)
+  const [fileDetails, setFileDetails] = useState<ReadonlyMap<string, DiffFile>>(new Map())
+  const [fileLoading, setFileLoading] = useState(false)
+  const [fileError, setFileError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [sidebarWidth, setSidebarWidth] = useState(250)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
@@ -199,38 +223,106 @@ export function GitDiffDock(props: GitDiffDockProps) {
   const leftRef = useRef<HTMLDivElement>(null)
   const rightRef = useRef<HTMLDivElement>(null)
   const syncing = useRef(false)
+  const loadController = useRef<AbortController | null>(null)
+  const loadRequestId = useRef(0)
+  const fileController = useRef<AbortController | null>(null)
+  const fileRequestId = useRef(0)
   const filteredRepository = useMemo(() => repository === null ? null : filterRepositoryTree(repository, query), [query, repository])
   const filteredPaths = useMemo(() => new Set(
     query.trim() === '' ? files.map(file => file.path) : files.filter(file => fuzzyPathMatch(file.path, query)).map(file => file.path),
   ), [files, query])
-  const activeFile = useMemo(() => {
+  const activeSummary = useMemo(() => {
     const current = files.find(file => file.path === activePath && filteredPaths.has(file.path))
     return current ?? files.find(file => filteredPaths.has(file.path))
   }, [activePath, files, filteredPaths])
+  const activeFile = activeSummary === undefined ? undefined : fileDetails.get(activeSummary.id)
 
-  const load = useCallback(async (signal?: AbortSignal) => {
+  const load = useCallback(async () => {
     if (cwd === undefined || cwd === '') { setError(t('noWorkspace')); return }
+    loadController.current?.abort()
+    const controller = new AbortController()
+    loadController.current = controller
+    const requestId = ++loadRequestId.current
     setLoading(true)
     setError(null)
-    const result = await readDiff(cwd, signal)
-    if (!result.ok) setError(result.error.message)
-    else {
-      setFiles(result.value.files)
-      setRepository(result.value.repository)
-      setExpanded(current => current.size === 0
-        ? new Set(result.value.repository.children.filter(child => countRepositoryChanges(child) > 0).map(child => child.path))
-        : current)
-      setActivePath(current => result.value.files.some(file => file.path === current) ? current : result.value.files[0]?.path ?? null)
+    try {
+      const result = await readDiff(cwd, controller.signal)
+      if (requestId !== loadRequestId.current) return
+      if (!result.ok) setError(result.error.message)
+      else {
+        setFiles(result.value.files)
+        setRepository(result.value.repository)
+        setManifestId(result.value.manifestId)
+        setFileDetails(new Map())
+        setFileError(null)
+        setExpanded(current => current.size === 0
+          ? new Set(result.value.repository.children.filter(child => countRepositoryChanges(child) > 0).map(child => child.path))
+          : current)
+        setActivePath(current => result.value.files.some(file => file.path === current) ? current : result.value.files[0]?.path ?? null)
+      }
+    } catch (cause) {
+      if (!(cause instanceof DOMException && cause.name === 'AbortError') && requestId === loadRequestId.current) {
+        setError(cause instanceof Error ? cause.message : 'Git diff service is unavailable')
+      }
+    } finally {
+      if (requestId === loadRequestId.current) {
+        loadController.current = null
+        setLoading(false)
+      }
     }
-    setLoading(false)
   }, [cwd, t])
 
   useEffect(() => {
-    if (!open) return
-    const controller = new AbortController()
-    void load(controller.signal)
-    return () => controller.abort()
+    if (!open) {
+      loadController.current?.abort()
+      loadController.current = null
+      loadRequestId.current += 1
+      setLoading(false)
+      return
+    }
+    void load()
+    return () => {
+      loadController.current?.abort()
+      loadController.current = null
+      loadRequestId.current += 1
+    }
   }, [load, open])
+
+  useEffect(() => {
+    if (!open || cwd === undefined || cwd === '' || manifestId === null || activeSummary === undefined || fileDetails.has(activeSummary.id)) return
+    fileController.current?.abort()
+    const controller = new AbortController()
+    fileController.current = controller
+    const requestId = ++fileRequestId.current
+    setFileLoading(true)
+    setFileError(null)
+    void readDiffFile({
+      path: cwd,
+      manifestId,
+      fileId: activeSummary.id,
+    }, controller.signal).then(result => {
+      if (requestId !== fileRequestId.current) return
+      if (!result.ok) setFileError(result.error.message)
+      else setFileDetails(current => new Map(current).set(result.value.id, result.value))
+    }).catch(cause => {
+      if (!(cause instanceof DOMException && cause.name === 'AbortError') && requestId === fileRequestId.current) {
+        setFileError(cause instanceof Error ? cause.message : 'Git diff service is unavailable')
+      }
+    }).finally(() => {
+      if (requestId === fileRequestId.current) {
+        fileController.current = null
+        setFileLoading(false)
+      }
+    })
+    return () => {
+      controller.abort()
+      if (requestId === fileRequestId.current) {
+        fileController.current = null
+        fileRequestId.current += 1
+        setFileLoading(false)
+      }
+    }
+  }, [activeSummary, cwd, fileDetails, manifestId, open])
 
   useEffect(() => {
     if (!open) return
@@ -346,7 +438,7 @@ export function GitDiffDock(props: GitDiffDockProps) {
                 </div>
                 {filteredRepository !== null && <RepositoryTree
                   repository={filteredRepository}
-                  activePath={activeFile?.path ?? null}
+                  activePath={activeSummary?.path ?? null}
                   expanded={query.trim() === '' ? expanded : allRepositoryPaths(filteredRepository)}
                   onToggle={path => setExpanded(current => {
                     const next = new Set(current)
@@ -361,10 +453,13 @@ export function GitDiffDock(props: GitDiffDockProps) {
               <div className="dgdSidebarResize" role="separator" aria-orientation="vertical" aria-label={t('resizeFileList')} onPointerDown={beginSidebarResize} />
               <main className="dgdMain">
                 {loading ? <div className="dgdCenter">{t('loading')}</div>
-                  : error !== null ? <div className="dgdCenter" role="alert">{error}</div>
-                    : activeFile === undefined ? <div className="dgdCenter">{t('empty')}</div>
-                      : activeFile.binary ? <><SelectedFileHeader file={activeFile} t={t} /><div className="dgdCenter">{t('binary')}</div></>
-                        : <>
+                   : error !== null ? <div className="dgdCenter" role="alert">{error}</div>
+                     : activeSummary === undefined ? <div className="dgdCenter">{t('empty')}</div>
+                       : fileLoading ? <><SelectedFileHeader file={activeSummary} t={t} /><div className="dgdCenter">{t('loading')}</div></>
+                         : fileError !== null ? <><SelectedFileHeader file={activeSummary} t={t} /><div className="dgdCenter" role="alert">{fileError}</div></>
+                           : activeFile === undefined ? <div className="dgdCenter">{t('empty')}</div>
+                             : activeFile.binary ? <><SelectedFileHeader file={activeFile} t={t} /><div className="dgdCenter">{t('binary')}</div></>
+                               : <>
                             <SelectedFileHeader file={activeFile} t={t} />
                             <div className="dgdColumnsHead"><span>{t('before')}</span><span>{t('after')}</span><span /></div>
                             {activeFile.truncated && <div className="dgdNotice">{t('truncated')}</div>}

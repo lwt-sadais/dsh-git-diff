@@ -19,15 +19,17 @@ export interface ChangeMarker {
   readonly kind: 'delete' | 'insert'
 }
 
-export interface DiffFile {
-  /** Path relative to the top-level workspace (globally unique in this snapshot). */
+export interface DiffFileSummary {
+  readonly id: string
+  /** Path relative to the top-level workspace (globally unique in this manifest). */
   readonly path: string
-  /** Path relative to the repository that owns this file. */
   readonly repositoryRelativePath: string
-  /** Owning repository path relative to the top-level workspace; empty for root. */
   readonly repositoryPath: string
   readonly oldPath: string | null
   readonly status: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked'
+}
+
+export interface DiffFile extends DiffFileSummary {
   readonly binary: boolean
   readonly truncated: boolean
   readonly before: string
@@ -37,27 +39,29 @@ export interface DiffFile {
 }
 
 export interface DiffRepository {
-  /** Repository path relative to the top-level workspace; empty for root. */
   readonly path: string
   readonly name: string
   readonly initialized: boolean
-  /** The parent repository records a changed gitlink commit for this submodule. */
   readonly headChanged: boolean
-  readonly files: readonly DiffFile[]
+  readonly files: readonly DiffFileSummary[]
   readonly children: readonly DiffRepository[]
 }
 
 export interface DiffResponse {
-  readonly root: string
+  readonly manifestId: string
   readonly generatedAt: string
-  /** Flat compatibility/index list, including files from every initialized repository. */
-  readonly files: readonly DiffFile[]
-  /** Root repository and recursively nested submodule repositories. */
+  readonly files: readonly DiffFileSummary[]
   readonly repository: DiffRepository
 }
 
+export interface DiffFileRequest {
+  readonly path: string
+  readonly manifestId: string
+  readonly fileId: string
+}
+
 export interface ApiError {
-  readonly code: 'workspace-unknown' | 'not-git-repository' | 'too-large' | 'invalid-request' | 'internal'
+  readonly code: 'workspace-unknown' | 'not-git-repository' | 'manifest-stale' | 'file-unknown' | 'too-large' | 'invalid-request' | 'internal'
   readonly message: string
 }
 

@@ -1,11 +1,12 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isIP } from 'node:net'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ApiResult, DiffResponse } from '../core/types.js'
+import type { ApiResult, DiffFile, DiffFileRequest, DiffResponse } from '../core/types.js'
 import type { DiffService } from './diff-service.js'
 
-const ROUTE = '/api/dsh-git-diff/snapshot'
-const BODY_CAP = 8 * 1024
+const SNAPSHOT_ROUTE = '/api/dsh-git-diff/snapshot'
+const FILE_ROUTE = '/api/dsh-git-diff/file'
+const BODY_CAP = 16 * 1024
 
 function allowed(req: IncomingMessage): boolean {
   const address = req.socket.remoteAddress?.replace(/^::ffff:/u, '')
@@ -29,14 +30,31 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
 }
 
-function pathOf(value: unknown): string | null {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
-  const record = value as Record<string, unknown>
-  if (Object.keys(record).length !== 1 || typeof record.path !== 'string' || record.path.length === 0 || record.path.length > 4096) return null
-  return record.path
+function recordOf(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
 }
 
-function send(res: ServerResponse, status: number, result: ApiResult<DiffResponse>): void {
+function boundedString(value: unknown, allowEmpty = false): string | null {
+  return typeof value === 'string' && value.length <= 4096 && (allowEmpty || value.length > 0) ? value : null
+}
+
+function pathOf(value: unknown): string | null {
+  const record = recordOf(value)
+  if (record === null || Object.keys(record).length !== 1) return null
+  return boundedString(record.path)
+}
+
+function fileRequestOf(value: unknown): DiffFileRequest | null {
+  const record = recordOf(value)
+  if (record === null || Object.keys(record).length !== 3) return null
+  const path = boundedString(record.path)
+  const manifestId = boundedString(record.manifestId)
+  const fileId = boundedString(record.fileId)
+  return path === null || manifestId === null || fileId === null
+    ? null : { path, manifestId, fileId }
+}
+
+function send<T>(res: ServerResponse, status: number, result: ApiResult<T>): void {
   res.statusCode = status
   res.setHeader('content-type', 'application/json; charset=utf-8')
   res.setHeader('cache-control', 'no-store')
@@ -44,10 +62,10 @@ function send(res: ServerResponse, status: number, result: ApiResult<DiffRespons
   res.end(JSON.stringify(result))
 }
 
-export function registerRoutes(ctx: Context, service: DiffService): () => void {
+function registerRoute<T>(ctx: Context, route: string, parse: (value: unknown) => T | null, run: (value: T, signal: AbortSignal) => Promise<ApiResult<DiffResponse | DiffFile>>): () => void {
   return ctx.webServer.register({
     kind: 'exact',
-    path: ROUTE,
+    path: route,
     handler: async (req, res) => {
       if (req.method !== 'POST' || !allowed(req)) {
         send(res, 403, { ok: false, error: { code: 'invalid-request', message: 'local same-origin JSON POST required' } })
@@ -58,17 +76,17 @@ export function registerRoutes(ctx: Context, service: DiffService): () => void {
       req.once('aborted', abort)
       res.once('close', abort)
       try {
-        const path = pathOf(await readBody(req))
-        if (path === null) {
-          send(res, 400, { ok: false, error: { code: 'invalid-request', message: 'invalid workspace path request' } })
+        const value = parse(await readBody(req))
+        if (value === null) {
+          send(res, 400, { ok: false, error: { code: 'invalid-request', message: 'invalid Git diff request' } })
           return
         }
-        const result = await service.snapshot(path, controller.signal)
+        const result = await run(value, controller.signal)
         if (!controller.signal.aborted && !res.destroyed) send(res, result.ok ? 200 : 400, result)
       } catch (cause) {
         if (!controller.signal.aborted && !res.destroyed) {
-          ctx.logger.warn(`dsh-git-diff: snapshot failed: ${String(cause)}`)
-          send(res, 500, { ok: false, error: { code: 'internal', message: 'unable to build Git diff snapshot' } })
+          ctx.logger.warn(`dsh-git-diff: request failed: ${String(cause)}`)
+          send(res, 500, { ok: false, error: { code: 'internal', message: 'unable to build Git diff response' } })
         }
       } finally {
         req.off('aborted', abort)
@@ -76,4 +94,10 @@ export function registerRoutes(ctx: Context, service: DiffService): () => void {
       }
     },
   })
+}
+
+export function registerRoutes(ctx: Context, service: DiffService): () => void {
+  const disposeSnapshot = registerRoute(ctx, SNAPSHOT_ROUTE, pathOf, (path, signal) => service.snapshot(path, signal))
+  const disposeFile = registerRoute(ctx, FILE_ROUTE, fileRequestOf, (request, signal) => service.file(request, signal))
+  return () => { disposeFile(); disposeSnapshot() }
 }
