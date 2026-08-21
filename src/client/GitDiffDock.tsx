@@ -28,6 +28,17 @@ function lineClass(line: DiffLine): string {
   return 'dgdEqual'
 }
 
+function SelectedFileHeader({ file, t }: { file: DiffFile, t: GitDiffDockProps['t'] }) {
+  return (
+    <div className="dgdSelectedFile" title={file.path}>
+      <span className="dgdSelectedFileIcon" aria-hidden="true">‹/›</span>
+      {file.oldPath !== null && <><span className="dgdSelectedFileRename">{file.oldPath}</span><span aria-hidden="true">→</span></>}
+      <span className="dgdSelectedFilePath">{file.path}</span>
+      <span className="dgdStatus">{t(STATUS_KEYS[file.status])}</span>
+    </div>
+  )
+}
+
 function DiffPane({ file, side, paneRef, onScroll, onSelect }: {
   file: DiffFile
   side: 'before' | 'after'
@@ -211,8 +222,9 @@ export function GitDiffDock(props: GitDiffDockProps) {
                 {loading ? <div className="dgdCenter">{t('loading')}</div>
                   : error !== null ? <div className="dgdCenter" role="alert">{error}</div>
                     : activeFile === undefined ? <div className="dgdCenter">{t('empty')}</div>
-                      : activeFile.binary ? <div className="dgdCenter">{t('binary')}</div>
+                      : activeFile.binary ? <><SelectedFileHeader file={activeFile} t={t} /><div className="dgdCenter">{t('binary')}</div></>
                         : <>
+                            <SelectedFileHeader file={activeFile} t={t} />
                             <div className="dgdColumnsHead"><span>{t('before')}</span><span>{t('after')}</span><span /></div>
                             {activeFile.truncated && <div className="dgdNotice">{t('truncated')}</div>}
                             <div className="dgdDiffViewport">
