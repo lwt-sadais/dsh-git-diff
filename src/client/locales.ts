@@ -6,6 +6,10 @@ export const zh = {
   refresh: '刷新',
   loading: '正在读取本地改动…',
   empty: '当前工作区没有本地改动',
+  searchPlaceholder: '搜索文件路径',
+  clearSearch: '清空搜索',
+  noMatches: '没有匹配的文件',
+  resizeFileList: '调整文件列表宽度',
   before: '修改前',
   after: '修改后',
   binary: '二进制文件不支持文本对比',
@@ -33,6 +37,7 @@ export const zh = {
 export const en = {
   button: 'Git Diff', title: 'Review local changes', subtitle: 'Select code and annotate it, then insert the review into the chat draft.',
   close: 'Close', refresh: 'Refresh', loading: 'Reading local changes…', empty: 'No local changes in this workspace',
+  searchPlaceholder: 'Search file paths', clearSearch: 'Clear search', noMatches: 'No matching files', resizeFileList: 'Resize file list',
   before: 'Before', after: 'After', binary: 'Binary files cannot be compared as text', truncated: 'Large file: showing the first 2 MiB',
   selectionHint: 'Select content in either column, then add an annotation', annotate: 'Add annotation', annotationPlaceholder: 'Comment on the selected content…',
   saveAnnotation: 'Save annotation', cancel: 'Cancel', annotations: 'Annotations', removeAnnotation: 'Remove annotation', sendToChat: 'Send to conversation',

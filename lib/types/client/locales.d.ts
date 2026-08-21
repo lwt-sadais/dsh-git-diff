@@ -6,6 +6,10 @@ export declare const zh: {
     readonly refresh: "刷新";
     readonly loading: "正在读取本地改动…";
     readonly empty: "当前工作区没有本地改动";
+    readonly searchPlaceholder: "搜索文件路径";
+    readonly clearSearch: "清空搜索";
+    readonly noMatches: "没有匹配的文件";
+    readonly resizeFileList: "调整文件列表宽度";
     readonly before: "修改前";
     readonly after: "修改后";
     readonly binary: "二进制文件不支持文本对比";
@@ -37,6 +41,10 @@ export declare const en: {
     readonly refresh: "Refresh";
     readonly loading: "Reading local changes…";
     readonly empty: "No local changes in this workspace";
+    readonly searchPlaceholder: "Search file paths";
+    readonly clearSearch: "Clear search";
+    readonly noMatches: "No matching files";
+    readonly resizeFileList: "Resize file list";
     readonly before: "Before";
     readonly after: "After";
     readonly binary: "Binary files cannot be compared as text";

@@ -6,6 +6,7 @@ import { gitDiffToolbarIcon } from './assets/git-diff-toolbar.js'
 import type { DiffFile, DiffLine, DiffRepository, ReviewAnnotation } from '../core/types.js'
 import type { GitDiffLocaleKey } from './locales.js'
 import { readDiff } from './api.js'
+import { filterRepositoryTree, fuzzyPathMatch } from './fuzzy-path.js'
 
 export type GitDiffDockProps = PropsRuntime<'conversation.input.left'> & PropsLocale<'git-diff'>
 
@@ -19,6 +20,10 @@ interface SelectedCode {
 
 const STATUS_KEYS: Record<DiffFile['status'], GitDiffLocaleKey> = {
   modified: 'statusModified', added: 'statusAdded', deleted: 'statusDeleted', renamed: 'statusRenamed', untracked: 'statusUntracked',
+}
+
+function statusClass(status: DiffFile['status']): string {
+  return `dgdStatus dgdStatus${status[0]!.toUpperCase()}${status.slice(1)}`
 }
 
 function lineClass(line: DiffLine): string {
@@ -68,7 +73,7 @@ function RepositoryTree({ repository, activePath, expanded, onToggle, onSelect, 
             title={file.path}
             style={{ paddingLeft: `${10 + (root ? 0 : depth + 1) * 14}px` }}
           >
-            <span className="dgdStatus">{t(STATUS_KEYS[file.status])}</span>
+            <span className={statusClass(file.status)}>{t(STATUS_KEYS[file.status])}</span>
             <span className="dgdPath">{file.repositoryRelativePath}</span>
           </button>
         ))}
@@ -93,13 +98,23 @@ function countRepositoryChanges(repository: DiffRepository): number {
     + repository.children.reduce((sum, child) => sum + countRepositoryChanges(child), 0)
 }
 
+function allRepositoryPaths(repository: DiffRepository): ReadonlySet<string> {
+  const paths = new Set<string>()
+  const visit = (node: DiffRepository) => {
+    if (node.path !== '') paths.add(node.path)
+    for (const child of node.children) visit(child)
+  }
+  visit(repository)
+  return paths
+}
+
 function SelectedFileHeader({ file, t }: { file: DiffFile, t: GitDiffDockProps['t'] }) {
   return (
     <div className="dgdSelectedFile" title={file.path}>
       <span className="dgdSelectedFileIcon" aria-hidden="true">‹/›</span>
       {file.oldPath !== null && <><span className="dgdSelectedFileRename">{file.oldPath}</span><span aria-hidden="true">→</span></>}
       <span className="dgdSelectedFilePath">{file.path}</span>
-      <span className="dgdStatus">{t(STATUS_KEYS[file.status])}</span>
+      <span className={statusClass(file.status)}>{t(STATUS_KEYS[file.status])}</span>
     </div>
   )
 }
@@ -173,6 +188,8 @@ export function GitDiffDock(props: GitDiffDockProps) {
   const [error, setError] = useState<string | null>(null)
   const [files, setFiles] = useState<readonly DiffFile[]>([])
   const [repository, setRepository] = useState<DiffRepository | null>(null)
+  const [query, setQuery] = useState('')
+  const [sidebarWidth, setSidebarWidth] = useState(250)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [activePath, setActivePath] = useState<string | null>(null)
   const [selection, setSelection] = useState<SelectedCode | null>(null)
@@ -182,7 +199,14 @@ export function GitDiffDock(props: GitDiffDockProps) {
   const leftRef = useRef<HTMLDivElement>(null)
   const rightRef = useRef<HTMLDivElement>(null)
   const syncing = useRef(false)
-  const activeFile = useMemo(() => files.find(file => file.path === activePath) ?? files[0], [activePath, files])
+  const filteredRepository = useMemo(() => repository === null ? null : filterRepositoryTree(repository, query), [query, repository])
+  const filteredPaths = useMemo(() => new Set(
+    query.trim() === '' ? files.map(file => file.path) : files.filter(file => fuzzyPathMatch(file.path, query)).map(file => file.path),
+  ), [files, query])
+  const activeFile = useMemo(() => {
+    const current = files.find(file => file.path === activePath && filteredPaths.has(file.path))
+    return current ?? files.find(file => filteredPaths.has(file.path))
+  }, [activePath, files, filteredPaths])
 
   const load = useCallback(async (signal?: AbortSignal) => {
     if (cwd === undefined || cwd === '') { setError(t('noWorkspace')); return }
@@ -267,6 +291,21 @@ export function GitDiffDock(props: GitDiffDockProps) {
     rightRef.current?.scrollTo({ top: Math.max(0, top - (rightRef.current.clientHeight / 2)), behavior: 'smooth' })
   }
 
+  const beginSidebarResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    const startX = event.clientX
+    const startWidth = sidebarWidth
+    const move = (moveEvent: PointerEvent) => setSidebarWidth(Math.min(520, Math.max(180, startWidth + moveEvent.clientX - startX)))
+    const finish = () => {
+      document.removeEventListener('pointermove', move)
+      document.removeEventListener('pointerup', finish)
+      document.body.classList.remove('dgdResizing')
+    }
+    document.body.classList.add('dgdResizing')
+    document.addEventListener('pointermove', move)
+    document.addEventListener('pointerup', finish, { once: true })
+  }
+
   return (
     <div className="dgdDock">
       <Tooltip label={t('button')} side="top" delayMs={500}>
@@ -286,12 +325,25 @@ export function GitDiffDock(props: GitDiffDockProps) {
                 <button className="dgdIconButton" type="button" onClick={() => setOpen(false)} aria-label={t('close')}>×</button>
               </div>
             </header>
-            <div className="dgdBody">
+            <div className="dgdBody" style={{ gridTemplateColumns: `${sidebarWidth}px 5px minmax(0, 1fr)` }}>
               <aside className="dgdFiles">
-                {repository !== null && <RepositoryTree
-                  repository={repository}
+                <div className="dgdFileSearch">
+                  <span className="dgdSearchIcon" aria-hidden="true">⌕</span>
+                  <input
+                    type="search"
+                    value={query}
+                    onChange={event => setQuery(event.target.value)}
+                    placeholder={t('searchPlaceholder')}
+                    aria-label={t('searchPlaceholder')}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  {query !== '' && <button type="button" onClick={() => setQuery('')} aria-label={t('clearSearch')}>×</button>}
+                </div>
+                {filteredRepository !== null && <RepositoryTree
+                  repository={filteredRepository}
                   activePath={activeFile?.path ?? null}
-                  expanded={expanded}
+                  expanded={query.trim() === '' ? expanded : allRepositoryPaths(filteredRepository)}
                   onToggle={path => setExpanded(current => {
                     const next = new Set(current)
                     next.has(path) ? next.delete(path) : next.add(path)
@@ -300,7 +352,9 @@ export function GitDiffDock(props: GitDiffDockProps) {
                   onSelect={setActivePath}
                   t={t}
                 />}
+                {query.trim() !== '' && filteredPaths.size === 0 && <div className="dgdNoMatches">{t('noMatches')}</div>}
               </aside>
+              <div className="dgdSidebarResize" role="separator" aria-orientation="vertical" aria-label={t('resizeFileList')} onPointerDown={beginSidebarResize} />
               <main className="dgdMain">
                 {loading ? <div className="dgdCenter">{t('loading')}</div>
                   : error !== null ? <div className="dgdCenter" role="alert">{error}</div>
