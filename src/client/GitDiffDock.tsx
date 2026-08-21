@@ -254,6 +254,10 @@ export function GitDiffDock(props: GitDiffDockProps) {
     const review = formatReview(annotations)
     inputActions.setDraft(draft.trim() === '' ? review : `${draft.trimEnd()}\n\n${review}`)
     setSent(true)
+    setSelection(null)
+    setComment('')
+    window.getSelection()?.removeAllRanges()
+    setOpen(false)
   }
 
   const locate = (row: number) => {
