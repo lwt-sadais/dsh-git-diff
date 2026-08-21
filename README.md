@@ -16,15 +16,27 @@ DeepSeek Harness Web GUI 插件：在聊天输入框内部的语音输入按钮�
 
 ## 安装
 
+插件支持直接从 GitHub 安装。
+
+### 在普通系统终端中安装
+
+普通终端无法自动判断 DSH Desktop 当前使用的 profile，需要明确指定 `desktop`：
+
 ```bash
-git clone https://github.com/lwt-sadais/dsh-git-diff.git
-cd dsh-git-diff
-pnpm install
-pnpm run check
-dsh plugin --profile desktop add link:$(pwd)
+dsh plugin --profile desktop add github:lwt-sadais/dsh-git-diff
 ```
 
-安装或 Host 代码变更后重启 DSH，再刷新现有 Web GUI。
+### 在 DSH Desktop 内置的 DSH 终端中安装
+
+从 DSH Desktop 打开的内置终端已经绑定当前 Desktop profile，不需要传入 `--profile`：
+
+```bash
+dsh plugin add github:lwt-sadais/dsh-git-diff
+```
+
+仓库已经提交可直接加载的 `lib/` 构建产物，因此通常不需要在安装机器上额外编译。
+
+安装成功后重启 DSH Desktop，再刷新现有 Web GUI。
 
 ## 开发
 
