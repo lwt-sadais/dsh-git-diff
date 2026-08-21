@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { IconCodeOutline16, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { DiffFile, DiffLine, ReviewAnnotation } from '../core/types.js'
 import type { GitDiffLocaleKey } from './locales.js'
@@ -182,9 +183,11 @@ export function GitDiffDock(props: GitDiffDockProps) {
 
   return (
     <div className="dgdDock">
-      <button type="button" className="dgdLauncher" onClick={() => { setOpen(true); setSent(false) }} aria-label={t('button')}>
-        <span aria-hidden="true">±</span>{t('button')}
-      </button>
+      <Tooltip label={t('button')} side="top" delayMs={500}>
+        <button type="button" className="dgdLauncher" onClick={() => { setOpen(true); setSent(false) }} aria-label={t('button')} title={t('button')}>
+          <IconCodeOutline16 size={16} />
+        </button>
+      </Tooltip>
       {open && createPortal(
         <div className="dgdOverlay" role="dialog" aria-modal="true" aria-label={t('title')}>
           <button className="dgdMask" type="button" onClick={() => setOpen(false)} aria-label={t('close')} />
