@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { IconCodeOutline16, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import { gitDiffToolbarIcon } from './assets/git-diff-toolbar.js'
 import type { DiffFile, DiffLine, DiffRepository, ReviewAnnotation } from '../core/types.js'
 import type { GitDiffLocaleKey } from './locales.js'
 import { readDiff } from './api.js'
@@ -270,7 +271,7 @@ export function GitDiffDock(props: GitDiffDockProps) {
     <div className="dgdDock">
       <Tooltip label={t('button')} side="top" delayMs={500}>
         <button type="button" className="dgdLauncher" onClick={() => { setOpen(true); setSent(false) }} aria-label={t('button')} title={t('button')}>
-          <IconCodeOutline16 size={16} />
+          <img className="dgdLauncherIcon" src={gitDiffToolbarIcon} alt="" aria-hidden="true" />
         </button>
       </Tooltip>
       {open && createPortal(
