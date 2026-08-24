@@ -1,4 +1,4 @@
-import { mkdtemp, realpath, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdtemp, realpath, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -101,6 +101,107 @@ describe('DiffService lazy loading', () => {
       async resolve() { return { ok: true, value: canonicalRoot } },
     })
     await expect(service.file({ path: root, manifestId: 'unknown', fileId: 'unknown' })).resolves.toMatchObject({
+      ok: false, error: { code: 'manifest-stale' },
+    })
+  })
+
+  it('discards a tracked file through a bounded Git restore command', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dgd-discard-tracked-'))
+    await writeFile(join(root, 'a file.txt'), 'after\n')
+    const canonicalRoot = await realpath(root)
+    const calls: string[][] = []
+    const runner: GitRunner = {
+      async run(argv) {
+        calls.push([...argv])
+        const command = argv.join(' ')
+        if (command === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: `${canonicalRoot}\n`, stderr: '' }
+        if (command === 'status --porcelain=v1 -z --untracked-files=all') return { exitCode: 0, stdout: ' M a file.txt\0', stderr: '' }
+        if (command === 'status --porcelain=v1 -z --untracked-files=all -- a file.txt') return { exitCode: 0, stdout: ' M a file.txt\0', stderr: '' }
+        if (argv[0] === 'restore') return { exitCode: 0, stdout: '', stderr: '' }
+        return { exitCode: 1, stdout: '', stderr: '' }
+      },
+    }
+    const service = new DiffService(runner, { async resolve() { return { ok: true, value: canonicalRoot } } })
+    const snapshot = await service.snapshot(root)
+    if (!snapshot.ok) throw new Error('snapshot failed')
+
+    const result = await service.discard({ path: root, manifestId: snapshot.value.manifestId, fileId: snapshot.value.files[0]!.id })
+
+    expect(result).toEqual({ ok: true, value: null })
+    expect(calls).toContainEqual(['restore', '--source=HEAD', '--staged', '--worktree', '--', 'a file.txt'])
+    await expect(service.file({ path: root, manifestId: snapshot.value.manifestId, fileId: snapshot.value.files[0]!.id })).resolves.toMatchObject({
+      ok: false, error: { code: 'manifest-stale' },
+    })
+  })
+
+  it('deletes only the selected untracked file', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dgd-discard-untracked-'))
+    await writeFile(join(root, 'remove.txt'), 'remove\n')
+    await writeFile(join(root, 'keep.txt'), 'keep\n')
+    const canonicalRoot = await realpath(root)
+    const runner: GitRunner = {
+      async run(argv) {
+        const command = argv.join(' ')
+        if (command === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: `${canonicalRoot}\n`, stderr: '' }
+        if (command === 'status --porcelain=v1 -z --untracked-files=all') return { exitCode: 0, stdout: '?? remove.txt\0?? keep.txt\0', stderr: '' }
+        if (command === 'status --porcelain=v1 -z --untracked-files=all -- remove.txt') return { exitCode: 0, stdout: '?? remove.txt\0', stderr: '' }
+        return { exitCode: 1, stdout: '', stderr: '' }
+      },
+    }
+    const service = new DiffService(runner, { async resolve() { return { ok: true, value: canonicalRoot } } })
+    const snapshot = await service.snapshot(root)
+    if (!snapshot.ok) throw new Error('snapshot failed')
+    const target = snapshot.value.files.find(file => file.path === 'remove.txt')!
+
+    await expect(service.discard({ path: root, manifestId: snapshot.value.manifestId, fileId: target.id })).resolves.toEqual({ ok: true, value: null })
+    await expect(lstat(join(root, 'remove.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(lstat(join(root, 'keep.txt'))).resolves.toBeDefined()
+  })
+
+  it('restores both paths of a renamed file', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dgd-discard-renamed-'))
+    await writeFile(join(root, 'new.txt'), 'renamed\n')
+    const canonicalRoot = await realpath(root)
+    const calls: string[][] = []
+    const runner: GitRunner = {
+      async run(argv) {
+        calls.push([...argv])
+        const command = argv.join(' ')
+        if (command === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: `${canonicalRoot}\n`, stderr: '' }
+        if (command === 'status --porcelain=v1 -z --untracked-files=all') return { exitCode: 0, stdout: 'R  new.txt\0old.txt\0', stderr: '' }
+        if (argv[0] === 'restore') return { exitCode: 0, stdout: '', stderr: '' }
+        return { exitCode: 1, stdout: '', stderr: '' }
+      },
+    }
+    const service = new DiffService(runner, { async resolve() { return { ok: true, value: canonicalRoot } } })
+    const snapshot = await service.snapshot(root)
+    if (!snapshot.ok) throw new Error('snapshot failed')
+
+    await expect(service.discard({ path: root, manifestId: snapshot.value.manifestId, fileId: snapshot.value.files[0]!.id })).resolves.toEqual({ ok: true, value: null })
+    expect(calls).toContainEqual(['restore', '--source=HEAD', '--staged', '--worktree', '--', 'new.txt', 'old.txt'])
+  })
+
+  it('rejects discard when the manifest status no longer matches', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dgd-discard-stale-'))
+    await writeFile(join(root, 'a.txt'), 'after\n')
+    const canonicalRoot = await realpath(root)
+    let statusCalls = 0
+    const runner: GitRunner = {
+      async run(argv) {
+        const command = argv.join(' ')
+        if (command === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: `${canonicalRoot}\n`, stderr: '' }
+        if (command === 'status --porcelain=v1 -z --untracked-files=all') {
+          statusCalls += 1
+          return { exitCode: 0, stdout: statusCalls === 1 ? ' M a.txt\0' : '?? a.txt\0', stderr: '' }
+        }
+        return { exitCode: 1, stdout: '', stderr: '' }
+      },
+    }
+    const service = new DiffService(runner, { async resolve() { return { ok: true, value: canonicalRoot } } })
+    const snapshot = await service.snapshot(root)
+    if (!snapshot.ok) throw new Error('snapshot failed')
+
+    await expect(service.discard({ path: root, manifestId: snapshot.value.manifestId, fileId: snapshot.value.files[0]!.id })).resolves.toMatchObject({
       ok: false, error: { code: 'manifest-stale' },
     })
   })

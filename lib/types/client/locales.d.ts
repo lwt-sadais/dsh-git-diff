@@ -32,6 +32,12 @@ export declare const zh: {
     readonly statusDeleted: "删除";
     readonly statusRenamed: "重命名";
     readonly statusUntracked: "未跟踪";
+    readonly discardChanges: "丢弃修改";
+    readonly discardTitle: "丢弃此文件的修改？";
+    readonly discardDescription: "将恢复该文件的暂存区和工作区内容；未跟踪文件会被删除。此操作无法撤销。";
+    readonly discardAcknowledge: "我了解此操作无法撤销";
+    readonly discardConfirm: "确认丢弃";
+    readonly discarding: "正在丢弃修改…";
 };
 export declare const en: {
     readonly button: "Git Diff";
@@ -67,5 +73,11 @@ export declare const en: {
     readonly statusDeleted: "Deleted";
     readonly statusRenamed: "Renamed";
     readonly statusUntracked: "Untracked";
+    readonly discardChanges: "Discard changes";
+    readonly discardTitle: "Discard changes to this file?";
+    readonly discardDescription: "This restores the staged and working-tree content; untracked files are deleted. This cannot be undone.";
+    readonly discardAcknowledge: "I understand this cannot be undone";
+    readonly discardConfirm: "Discard";
+    readonly discarding: "Discarding changes…";
 };
 export type GitDiffLocaleKey = keyof typeof zh;

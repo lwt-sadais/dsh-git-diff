@@ -32,6 +32,12 @@ export const zh = {
   statusDeleted: '删除',
   statusRenamed: '重命名',
   statusUntracked: '未跟踪',
+  discardChanges: '丢弃修改',
+  discardTitle: '丢弃此文件的修改？',
+  discardDescription: '将恢复该文件的暂存区和工作区内容；未跟踪文件会被删除。此操作无法撤销。',
+  discardAcknowledge: '我了解此操作无法撤销',
+  discardConfirm: '确认丢弃',
+  discarding: '正在丢弃修改…',
 } as const
 
 export const en = {
@@ -43,7 +49,9 @@ export const en = {
   saveAnnotation: 'Save annotation', cancel: 'Cancel', annotations: 'Annotations', removeAnnotation: 'Remove annotation', sendToChat: 'Send to conversation',
   sentToChat: 'Annotations were added to the draft. Review and send them yourself.', selectTextFirst: 'Select file content first', fileCount: '{count} files',
   annotationCount: '{count} annotations', noWorkspace: 'The current session has no workspace', statusModified: 'Modified', statusAdded: 'Added',
-  statusDeleted: 'Deleted', statusRenamed: 'Renamed', statusUntracked: 'Untracked',
+  statusDeleted: 'Deleted', statusRenamed: 'Renamed', statusUntracked: 'Untracked', discardChanges: 'Discard changes',
+  discardTitle: 'Discard changes to this file?', discardDescription: 'This restores the staged and working-tree content; untracked files are deleted. This cannot be undone.',
+  discardAcknowledge: 'I understand this cannot be undone', discardConfirm: 'Discard', discarding: 'Discarding changes…',
 } as const
 
 export type GitDiffLocaleKey = keyof typeof zh

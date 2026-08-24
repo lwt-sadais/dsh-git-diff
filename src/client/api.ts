@@ -26,3 +26,8 @@ export function readDiff(path: string, signal?: AbortSignal): Promise<ApiResult<
 export function readDiffFile(request: DiffFileRequest, signal?: AbortSignal): Promise<ApiResult<DiffFile>> {
   return post('/api/dsh-git-diff/file', request, signal)
 }
+
+/** Discard one file selected from the current server-issued manifest. */
+export function discardDiffFile(request: DiffFileRequest, signal?: AbortSignal): Promise<ApiResult<null>> {
+  return post('/api/dsh-git-diff/discard', request, signal)
+}

@@ -6,6 +6,7 @@ import type { DiffService } from './diff-service.js'
 
 const SNAPSHOT_ROUTE = '/api/dsh-git-diff/snapshot'
 const FILE_ROUTE = '/api/dsh-git-diff/file'
+const DISCARD_ROUTE = '/api/dsh-git-diff/discard'
 const BODY_CAP = 16 * 1024
 
 function allowed(req: IncomingMessage): boolean {
@@ -62,7 +63,7 @@ function send<T>(res: ServerResponse, status: number, result: ApiResult<T>): voi
   res.end(JSON.stringify(result))
 }
 
-function registerRoute<T>(ctx: Context, route: string, parse: (value: unknown) => T | null, run: (value: T, signal: AbortSignal) => Promise<ApiResult<DiffResponse | DiffFile>>): () => void {
+function registerRoute<T>(ctx: Context, route: string, parse: (value: unknown) => T | null, run: (value: T, signal: AbortSignal) => Promise<ApiResult<DiffResponse | DiffFile | null>>): () => void {
   return ctx.webServer.register({
     kind: 'exact',
     path: route,
@@ -99,5 +100,6 @@ function registerRoute<T>(ctx: Context, route: string, parse: (value: unknown) =
 export function registerRoutes(ctx: Context, service: DiffService): () => void {
   const disposeSnapshot = registerRoute(ctx, SNAPSHOT_ROUTE, pathOf, (path, signal) => service.snapshot(path, signal))
   const disposeFile = registerRoute(ctx, FILE_ROUTE, fileRequestOf, (request, signal) => service.file(request, signal))
-  return () => { disposeFile(); disposeSnapshot() }
+  const disposeDiscard = registerRoute(ctx, DISCARD_ROUTE, fileRequestOf, (request, signal) => service.discard(request, signal))
+  return () => { disposeDiscard(); disposeFile(); disposeSnapshot() }
 }

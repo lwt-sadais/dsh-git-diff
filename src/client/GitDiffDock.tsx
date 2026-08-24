@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Menu, RiskConfirmation, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { gitDiffToolbarIcon } from './assets/git-diff-toolbar.js'
 import type { DiffFile, DiffFileSummary, DiffLine, DiffRepository, ReviewAnnotation } from '../core/types.js'
 import type { GitDiffLocaleKey } from './locales.js'
-import { readDiff, readDiffFile } from './api.js'
+import { discardDiffFile, readDiff, readDiffFile } from './api.js'
 import { filterRepositoryTree, fuzzyPathMatch } from './fuzzy-path.js'
 import { DIFF_ROW_HEIGHT, visibleRowRange } from './virtual-rows.js'
 
@@ -35,12 +35,13 @@ function lineClass(line: DiffLine): string {
   return 'dgdEqual'
 }
 
-function RepositoryTree({ repository, activePath, expanded, onToggle, onSelect, t, depth = 0 }: {
+function RepositoryTree({ repository, activePath, expanded, onToggle, onSelect, onContextMenu, t, depth = 0 }: {
   repository: DiffRepository
   activePath: string | null
   expanded: ReadonlySet<string>
   onToggle: (path: string) => void
   onSelect: (path: string) => void
+  onContextMenu: (file: DiffFileSummary, event: React.MouseEvent<HTMLButtonElement>) => void
   t: GitDiffDockProps['t']
   depth?: number
 }) {
@@ -71,6 +72,7 @@ function RepositoryTree({ repository, activePath, expanded, onToggle, onSelect, 
             type="button"
             key={file.path}
             onClick={() => onSelect(file.path)}
+            onContextMenu={event => onContextMenu(file, event)}
             title={file.path}
             style={{ paddingLeft: `${10 + (root ? 0 : depth + 1) * 14}px` }}
           >
@@ -85,6 +87,7 @@ function RepositoryTree({ repository, activePath, expanded, onToggle, onSelect, 
           expanded={expanded}
           onToggle={onToggle}
           onSelect={onSelect}
+          onContextMenu={onContextMenu}
           t={t}
           depth={root ? 0 : depth + 1}
         />)}
@@ -220,6 +223,10 @@ export function GitDiffDock(props: GitDiffDockProps) {
   const [comment, setComment] = useState('')
   const [annotations, setAnnotations] = useState<readonly ReviewAnnotation[]>([])
   const [sent, setSent] = useState(false)
+  const [contextMenu, setContextMenu] = useState<{ readonly file: DiffFileSummary, readonly x: number, readonly y: number } | null>(null)
+  const [discardTarget, setDiscardTarget] = useState<DiffFileSummary | null>(null)
+  const [discardAcknowledged, setDiscardAcknowledged] = useState(false)
+  const [discarding, setDiscarding] = useState(false)
   const leftRef = useRef<HTMLDivElement>(null)
   const rightRef = useRef<HTMLDivElement>(null)
   const syncing = useRef(false)
@@ -328,11 +335,13 @@ export function GitDiffDock(props: GitDiffDockProps) {
     if (!open) return
     const keydown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
+      if (contextMenu !== null) { setContextMenu(null); return }
+      if (discardTarget !== null) return
       selection === null ? setOpen(false) : setSelection(null)
     }
     document.addEventListener('keydown', keydown)
     return () => document.removeEventListener('keydown', keydown)
-  }, [open, selection])
+  }, [contextMenu, discardTarget, open, selection])
 
   useEffect(() => {
     setSelection(null)
@@ -398,6 +407,35 @@ export function GitDiffDock(props: GitDiffDockProps) {
     document.addEventListener('pointerup', finish, { once: true })
   }
 
+  /** Open the destructive file action menu at the pointer without trusting a raw path later. */
+  const openFileContextMenu = (file: DiffFileSummary, event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault()
+    setActivePath(file.path)
+    setContextMenu({ file, x: event.clientX, y: event.clientY })
+  }
+
+  /** Discard the confirmed manifest file and rebuild all Git-derived client state. */
+  const confirmDiscard = async () => {
+    if (cwd === undefined || cwd === '' || manifestId === null || discardTarget === null || discarding) return
+    const target = discardTarget
+    setDiscarding(true)
+    setError(null)
+    const result = await discardDiffFile({ path: cwd, manifestId, fileId: target.id })
+    setDiscarding(false)
+    setDiscardTarget(null)
+    setDiscardAcknowledged(false)
+    if (!result.ok) {
+      setError(result.error.message)
+      return
+    }
+    setAnnotations(current => current.filter(annotation => annotation.path !== target.path))
+    await load()
+  }
+
+  const contextAnchorRect = useCallback(() => contextMenu === null
+    ? null
+    : new DOMRect(contextMenu.x, contextMenu.y, 0, 0), [contextMenu])
+
   return (
     <div className="dgdDock">
       <Tooltip label={t('button')} side="top" delayMs={500}>
@@ -446,9 +484,26 @@ export function GitDiffDock(props: GitDiffDockProps) {
                     return next
                   })}
                   onSelect={setActivePath}
+                  onContextMenu={openFileContextMenu}
                   t={t}
                 />}
                 {query.trim() !== '' && filteredPaths.size === 0 && <div className="dgdNoMatches">{t('noMatches')}</div>}
+                <Menu
+                  open={contextMenu !== null}
+                  anchor={<span aria-hidden="true" />}
+                  items={[{ id: 'discard', label: t('discardChanges'), danger: true }]}
+                  onSelect={() => {
+                    if (contextMenu !== null) {
+                      setDiscardTarget(contextMenu.file)
+                      setDiscardAcknowledged(false)
+                    }
+                    setContextMenu(null)
+                  }}
+                  onClose={() => setContextMenu(null)}
+                  getAnchorRect={contextAnchorRect}
+                  portal
+                  compact
+                />
               </aside>
               <div className="dgdSidebarResize" role="separator" aria-orientation="vertical" aria-label={t('resizeFileList')} onPointerDown={beginSidebarResize} />
               <main className="dgdMain">
@@ -487,6 +542,23 @@ export function GitDiffDock(props: GitDiffDockProps) {
         </div>,
         document.body,
       )}
+      <RiskConfirmation
+        open={discardTarget !== null}
+        title={t('discardTitle')}
+        description={discardTarget === null ? t('discardDescription') : `${discardTarget.path}\n\n${t('discardDescription')}`}
+        acknowledgeLabel={t('discardAcknowledge')}
+        cancelLabel={t('cancel')}
+        confirmLabel={discarding ? t('discarding') : t('discardConfirm')}
+        acknowledged={discardAcknowledged}
+        disabled={discarding}
+        onAcknowledgedChange={setDiscardAcknowledged}
+        onCancel={() => {
+          if (discarding) return
+          setDiscardTarget(null)
+          setDiscardAcknowledged(false)
+        }}
+        onConfirm={() => void confirmDiscard()}
+      />
     </div>
   )
 }

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { lstat, readFile, realpath } from 'node:fs/promises'
+import { lstat, readFile, realpath, unlink } from 'node:fs/promises'
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path'
 import { diffLines } from 'diff'
 import type {
@@ -252,7 +252,8 @@ export class DiffService {
     }
   }
 
-  async file(request: DiffFileRequest, signal?: AbortSignal): Promise<ApiResult<DiffFile>> {
+  /** Resolve a client manifest reference without accepting a raw repository path. */
+  private async manifestEntry(request: DiffFileRequest): Promise<ApiResult<ManifestEntry>> {
     const workspace = await this.gate.resolve(request.path)
     if (!workspace.ok) return workspace
     const manifest = this.manifests.get(request.manifestId)
@@ -261,8 +262,50 @@ export class DiffService {
       return fail('manifest-stale', 'Git diff manifest has expired; refresh local changes')
     }
     const entry = manifest.files.get(request.fileId)
-    if (entry === undefined) return fail('file-unknown', 'file is not present in this Git diff manifest')
-    const { summary, repositoryRoot, sourcePath } = entry
+    return entry === undefined
+      ? fail('file-unknown', 'file is not present in this Git diff manifest')
+      : { ok: true, value: entry }
+  }
+
+  /** Discard one manifest file after confirming its Git status has not changed. */
+  async discard(request: DiffFileRequest, signal?: AbortSignal): Promise<ApiResult<null>> {
+    const resolved = await this.manifestEntry(request)
+    if (!resolved.ok) return resolved
+    const { summary, repositoryRoot } = resolved.value
+    const status = await this.runner.run(['status', '--porcelain=v1', '-z', '--untracked-files=all'], repositoryRoot, signal)
+    if (status.exitCode !== 0) return fail('internal', 'unable to verify the changed file')
+    const current = parseStatus(status.stdout).find(entry => entry.path === summary.repositoryRelativePath)
+    if (current === undefined || current.status !== summary.status || current.oldPath !== (summary.oldPath === null ? null : resolved.value.sourcePath)) {
+      return fail('manifest-stale', 'changed file status has changed; refresh local changes')
+    }
+
+    if (summary.status === 'untracked') {
+      const diskPath = safePath(repositoryRoot, summary.repositoryRelativePath)
+      if (diskPath === null) return fail('file-unknown', 'file path is invalid')
+      try {
+        const stat = await lstat(diskPath)
+        if (!stat.isFile() && !stat.isSymbolicLink()) return fail('file-unknown', 'untracked path is not a file')
+        await unlink(diskPath)
+      } catch (cause) {
+        if (cause instanceof Error && cause.name === 'AbortError') throw cause
+        return fail('manifest-stale', 'changed file is no longer available; refresh local changes')
+      }
+    } else {
+      const paths = summary.status === 'renamed'
+        ? [summary.repositoryRelativePath, resolved.value.sourcePath]
+        : [summary.repositoryRelativePath]
+      const restored = await this.runner.run(['restore', '--source=HEAD', '--staged', '--worktree', '--', ...paths], repositoryRoot, signal)
+      if (restored.exitCode !== 0) return fail('internal', 'unable to discard the changed file')
+    }
+    this.manifests.delete(request.manifestId)
+    return { ok: true, value: null }
+  }
+
+  /** Read the detailed before/after content for one manifest file. */
+  async file(request: DiffFileRequest, signal?: AbortSignal): Promise<ApiResult<DiffFile>> {
+    const resolved = await this.manifestEntry(request)
+    if (!resolved.ok) return resolved
+    const { summary, repositoryRoot, sourcePath } = resolved.value
     const diskPath = safePath(repositoryRoot, summary.repositoryRelativePath)
     if (diskPath === null) return fail('file-unknown', 'file path is invalid')
 
