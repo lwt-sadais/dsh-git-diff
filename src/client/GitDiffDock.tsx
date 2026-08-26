@@ -375,10 +375,12 @@ export function GitDiffDock(props: GitDiffDockProps) {
     window.getSelection()?.removeAllRanges()
   }
 
+  /** Append the current review to the conversation draft, then reset transient annotation state. */
   const sendToChat = () => {
     if (annotations.length === 0) return
     const review = formatReview(annotations)
     inputActions.setDraft(draft.trim() === '' ? review : `${draft.trimEnd()}\n\n${review}`)
+    setAnnotations([])
     setSent(true)
     setSelection(null)
     setComment('')
