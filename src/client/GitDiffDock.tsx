@@ -7,6 +7,7 @@ import type { DiffFile, DiffFileSummary, DiffLine, DiffRepository, ReviewAnnotat
 import type { GitDiffLocaleKey } from './locales.js'
 import { discardDiffFile, readDiff, readDiffFile } from './api.js'
 import { filterRepositoryTree, fuzzyPathMatch } from './fuzzy-path.js'
+import { findDiffMatches, type DiffSearchMatch, type DiffSide } from './diff-text.js'
 import { DIFF_ROW_HEIGHT, visibleRowRange } from './virtual-rows.js'
 
 export type GitDiffDockProps = PropsRuntime<'conversation.input.left'> & PropsLocale<'git-diff'>
@@ -123,16 +124,42 @@ function SelectedFileHeader({ file, t }: { file: DiffFileSummary, t: GitDiffDock
   )
 }
 
-function DiffPane({ file, side, paneRef, onScroll, onSelect }: {
+/** Render one code line with all visible search matches and a distinct active match. */
+function highlightedCode(text: string, matches: readonly DiffSearchMatch[], activeMatch: DiffSearchMatch | null): React.ReactNode {
+  if (matches.length === 0) return text || ' '
+  const parts: React.ReactNode[] = []
+  let offset = 0
+  for (const match of matches) {
+    if (match.startColumn > offset) parts.push(text.slice(offset, match.startColumn))
+    const active = activeMatch === match
+    parts.push(<mark className={active ? 'dgdSearchHit dgdSearchHitActive' : 'dgdSearchHit'} key={`${match.startColumn}-${match.endColumn}`}>{text.slice(match.startColumn, match.endColumn)}</mark>)
+    offset = match.endColumn
+  }
+  if (offset < text.length) parts.push(text.slice(offset))
+  return parts
+}
+
+function DiffPane({ file, side, paneRef, onScroll, onSelect, onFocusSide, focused, matches, activeMatch, label }: {
   file: DiffFile
-  side: 'before' | 'after'
+  side: DiffSide
   paneRef: React.RefObject<HTMLDivElement>
   onScroll: () => void
   onSelect: () => void
+  onFocusSide: () => void
+  focused: boolean
+  matches: readonly DiffSearchMatch[]
+  activeMatch: DiffSearchMatch | null
+  label: string
 }) {
   const [viewport, setViewport] = useState({ scrollTop: 0, height: 0 })
   const range = visibleRowRange(file.rows.length, viewport.scrollTop, viewport.height)
   const visibleRows = file.rows.slice(range.start, range.end)
+  const matchesByRow = useMemo(() => {
+    const grouped = new Map<number, DiffSearchMatch[]>()
+    for (const match of matches) grouped.set(match.rowIndex, [...(grouped.get(match.rowIndex) ?? []), match])
+    return grouped
+  }, [matches])
+  /** Update the virtual window and synchronize the opposite pane. */
   const handleScroll = () => {
     const pane = paneRef.current
     if (pane !== null) setViewport({ scrollTop: pane.scrollTop, height: pane.clientHeight })
@@ -148,15 +175,26 @@ function DiffPane({ file, side, paneRef, onScroll, onSelect }: {
     return () => observer.disconnect()
   }, [file.path, paneRef])
   return (
-    <div ref={paneRef} className="dgdPane" onScroll={handleScroll} onMouseUp={onSelect} data-side={side}>
+    <div
+      ref={paneRef}
+      className={`dgdPane ${focused ? 'dgdPaneFocused' : ''}`}
+      onScroll={handleScroll}
+      onMouseUp={onSelect}
+      onPointerDown={onFocusSide}
+      onFocus={onFocusSide}
+      data-side={side}
+      tabIndex={0}
+      aria-label={label}
+    >
       <div className="dgdRows" style={{ height: `${file.rows.length * DIFF_ROW_HEIGHT}px`, position: 'relative' }}>
         <div style={{ position: 'absolute', inset: `${range.start * DIFF_ROW_HEIGHT}px 0 auto 0` }}>
           {visibleRows.map(row => {
             const value = side === 'before' ? row.left : row.right
+            const rowMatches = matchesByRow.get(row.index) ?? []
             return (
               <div className={`dgdLine ${lineClass(value)}`} key={row.index} data-row={row.index} data-line={value.lineNumber ?? ''}>
                 <span className="dgdLineNo">{value.lineNumber ?? ''}</span>
-                <span className="dgdCode">{value.text || ' '}</span>
+                <span className="dgdCode">{highlightedCode(value.text, rowMatches, activeMatch)}</span>
               </div>
             )
           })}
@@ -198,7 +236,7 @@ function selectedCode(file: DiffFile, side: 'before' | 'after', pane: HTMLDivEle
     side,
     startLine: values[0]!.lineNumber!,
     endLine: values.at(-1)!.lineNumber!,
-    content: values.map(value => value.text).join('\n'),
+    content: selection.toString() || values.map(value => value.text).join('\n'),
   }
 }
 
@@ -219,6 +257,11 @@ export function GitDiffDock(props: GitDiffDockProps) {
   const [sidebarWidth, setSidebarWidth] = useState(250)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [activePath, setActivePath] = useState<string | null>(null)
+  const [focusedSide, setFocusedSide] = useState<DiffSide>('after')
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [matchCase, setMatchCase] = useState(false)
+  const [activeMatchIndex, setActiveMatchIndex] = useState(-1)
   const [selection, setSelection] = useState<SelectedCode | null>(null)
   const [comment, setComment] = useState('')
   const [annotations, setAnnotations] = useState<readonly ReviewAnnotation[]>([])
@@ -243,6 +286,12 @@ export function GitDiffDock(props: GitDiffDockProps) {
     return current ?? files.find(file => filteredPaths.has(file.path))
   }, [activePath, files, filteredPaths])
   const activeFile = activeSummary === undefined ? undefined : fileDetails.get(activeSummary.id)
+  const searchMatches = useMemo(
+    () => !searchOpen || activeFile === undefined ? [] : findDiffMatches(activeFile, focusedSide, searchQuery, matchCase),
+    [activeFile, focusedSide, matchCase, searchOpen, searchQuery],
+  )
+  const activeMatch = searchMatches[activeMatchIndex] ?? null
+  const searchInputRef = useRef<HTMLInputElement>(null)
 
   const load = useCallback(async () => {
     if (cwd === undefined || cwd === '') { setError(t('noWorkspace')); return }
@@ -333,19 +382,32 @@ export function GitDiffDock(props: GitDiffDockProps) {
 
   useEffect(() => {
     if (!open) return
+    /** Handle dialog-level search and dismissal shortcuts while the review dialog is open. */
     const keydown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === 'f') {
+        event.preventDefault()
+        setSearchOpen(true)
+        requestAnimationFrame(() => searchInputRef.current?.focus())
+        return
+      }
       if (event.key !== 'Escape') return
       if (contextMenu !== null) { setContextMenu(null); return }
       if (discardTarget !== null) return
+      if (searchOpen) { setSearchOpen(false); return }
       selection === null ? setOpen(false) : setSelection(null)
     }
     document.addEventListener('keydown', keydown)
     return () => document.removeEventListener('keydown', keydown)
-  }, [contextMenu, discardTarget, open, selection])
+  }, [contextMenu, discardTarget, open, searchOpen, selection])
+
+  useEffect(() => {
+    setActiveMatchIndex(-1)
+  }, [activeFile?.path, focusedSide, matchCase, searchQuery])
 
   useEffect(() => {
     setSelection(null)
     setComment('')
+    setSearchOpen(false)
     if (leftRef.current) { leftRef.current.scrollTop = 0; leftRef.current.scrollLeft = 0 }
     if (rightRef.current) { rightRef.current.scrollTop = 0; rightRef.current.scrollLeft = 0 }
   }, [activeFile?.path])
@@ -388,10 +450,39 @@ export function GitDiffDock(props: GitDiffDockProps) {
     setOpen(false)
   }
 
-  const locate = (row: number) => {
-    const top = row * 20
-    leftRef.current?.scrollTo({ top: Math.max(0, top - (leftRef.current.clientHeight / 2)), behavior: 'smooth' })
-    rightRef.current?.scrollTo({ top: Math.max(0, top - (rightRef.current.clientHeight / 2)), behavior: 'smooth' })
+  /** Scroll both virtual panes so an arbitrary diff row, rendered or not, becomes visible. */
+  const locate = (row: number, behavior: ScrollBehavior = 'smooth') => {
+    const viewportHeight = (focusedSide === 'before' ? leftRef.current : rightRef.current)?.clientHeight ?? 0
+    const top = Math.max(0, row * DIFF_ROW_HEIGHT - viewportHeight / 2 + DIFF_ROW_HEIGHT / 2)
+    leftRef.current?.scrollTo({ top, behavior })
+    rightRef.current?.scrollTo({ top, behavior })
+  }
+
+  /** Select a search result cyclically and materialize its virtual row. */
+  const navigateSearch = (step: number) => {
+    if (searchMatches.length === 0) return
+    const origin = activeMatchIndex < 0 ? (step > 0 ? -1 : 0) : activeMatchIndex
+    const next = (origin + step + searchMatches.length) % searchMatches.length
+    setActiveMatchIndex(next)
+    locate(searchMatches[next]!.rowIndex)
+  }
+
+  /** Copy the stable selected code while retaining it for a possible annotation. */
+  const copySelection = async () => {
+    if (selection === null) return
+    try {
+      await navigator.clipboard.writeText(selection.content)
+      setSent(false)
+    } catch {
+      const fallback = document.createElement('textarea')
+      fallback.value = selection.content
+      fallback.style.position = 'fixed'
+      fallback.style.opacity = '0'
+      document.body.appendChild(fallback)
+      fallback.select()
+      document.execCommand('copy')
+      fallback.remove()
+    }
   }
 
   const beginSidebarResize = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -518,18 +609,30 @@ export function GitDiffDock(props: GitDiffDockProps) {
                              : activeFile.binary ? <><SelectedFileHeader file={activeFile} t={t} /><div className="dgdCenter">{t('binary')}</div></>
                                : <>
                             <SelectedFileHeader file={activeFile} t={t} />
-                            <div className="dgdColumnsHead"><span>{t('before')}</span><span>{t('after')}</span><span /></div>
+                            {searchOpen && <div className="dgdContentSearch" role="search">
+                               <span>{t(focusedSide === 'before' ? 'searchBefore' : 'searchAfter')}</span>
+                               <input ref={searchInputRef} type="search" value={searchQuery} onChange={event => setSearchQuery(event.target.value)} onKeyDown={event => {
+                                 if (event.key === 'Enter') { event.preventDefault(); navigateSearch(event.shiftKey ? -1 : 1) }
+                                 if (event.key === 'Escape') { event.preventDefault(); setSearchOpen(false); (focusedSide === 'before' ? leftRef.current : rightRef.current)?.focus() }
+                               }} placeholder={t('contentSearchPlaceholder')} aria-label={t('contentSearchPlaceholder')} />
+                               <button className={matchCase ? 'dgdSearchOption dgdSearchOptionActive' : 'dgdSearchOption'} type="button" onClick={() => setMatchCase(value => !value)} aria-pressed={matchCase} title={t('matchCase')}>Aa</button>
+                               <span className="dgdSearchCount">{searchMatches.length === 0 ? '0 / 0' : `${Math.max(0, activeMatchIndex + 1)} / ${searchMatches.length}`}</span>
+                               <button type="button" onClick={() => navigateSearch(-1)} disabled={searchMatches.length === 0} aria-label={t('previousMatch')}>↑</button>
+                               <button type="button" onClick={() => navigateSearch(1)} disabled={searchMatches.length === 0} aria-label={t('nextMatch')}>↓</button>
+                               <button type="button" onClick={() => setSearchOpen(false)} aria-label={t('closeSearch')}>×</button>
+                             </div>}
+                             <div className="dgdColumnsHead"><span className={focusedSide === 'before' ? 'dgdColumnFocused' : ''}>{t('before')}</span><span className={focusedSide === 'after' ? 'dgdColumnFocused' : ''}>{t('after')}</span><span /></div>
                             {activeFile.truncated && <div className="dgdNotice">{t('truncated')}</div>}
                             <div className="dgdDiffViewport">
-                              <DiffPane file={activeFile} side="before" paneRef={leftRef} onScroll={() => sync(leftRef.current, rightRef.current)} onSelect={() => captureSelection('before')} />
-                              <DiffPane file={activeFile} side="after" paneRef={rightRef} onScroll={() => sync(rightRef.current, leftRef.current)} onSelect={() => captureSelection('after')} />
+                              <DiffPane file={activeFile} side="before" paneRef={leftRef} onScroll={() => sync(leftRef.current, rightRef.current)} onSelect={() => captureSelection('before')} onFocusSide={() => setFocusedSide('before')} focused={focusedSide === 'before'} matches={focusedSide === 'before' ? searchMatches : []} activeMatch={focusedSide === 'before' ? activeMatch : null} label={t('before')} />
+                              <DiffPane file={activeFile} side="after" paneRef={rightRef} onScroll={() => sync(rightRef.current, leftRef.current)} onSelect={() => captureSelection('after')} onFocusSide={() => setFocusedSide('after')} focused={focusedSide === 'after'} matches={focusedSide === 'after' ? searchMatches : []} activeMatch={focusedSide === 'after' ? activeMatch : null} label={t('after')} />
                               <div className="dgdIndicator" onClick={event => locate(Math.round((event.nativeEvent.offsetY / event.currentTarget.clientHeight) * Math.max(0, activeFile.rows.length - 1)))}>
                                 {activeFile.markers.map((marker, index) => <button key={`${marker.row}-${marker.kind}-${index}`} type="button" className={`dgdMarker ${marker.kind === 'delete' ? 'dgdMarkerDelete' : 'dgdMarkerInsert'}`} style={{ top: `${(marker.row / Math.max(1, activeFile.rows.length)) * 100}%` }} onClick={event => { event.stopPropagation(); locate(marker.row) }} aria-label={`${marker.kind} ${marker.row + 1}`} />)}
                               </div>
                               {selection !== null && <div className="dgdAnnotationComposer">
                                 <div className="dgdSelection">{selection.content}</div>
-                                <textarea autoFocus value={comment} onChange={event => setComment(event.target.value)} placeholder={t('annotationPlaceholder')} />
-                                <div className="dgdAnnotationActions"><button className="dgdSecondary" type="button" onClick={() => setSelection(null)}>{t('cancel')}</button><button className="dgdPrimary" type="button" onClick={saveAnnotation} disabled={comment.trim() === ''}>{t('saveAnnotation')}</button></div>
+                                <textarea value={comment} onChange={event => setComment(event.target.value)} placeholder={t('annotationPlaceholder')} />
+                                <div className="dgdAnnotationActions"><button className="dgdSecondary" type="button" onClick={() => void copySelection()}>{t('copySelection')}</button><button className="dgdSecondary" type="button" onClick={() => setSelection(null)}>{t('cancel')}</button><button className="dgdPrimary" type="button" onClick={saveAnnotation} disabled={comment.trim() === ''}>{t('saveAnnotation')}</button></div>
                               </div>}
                             </div>
                           </>}
