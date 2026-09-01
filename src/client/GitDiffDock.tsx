@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import type {} from '@deepseek-ai/dsh-api-session-controller/client'
 import { Menu, RiskConfirmation, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { gitDiffToolbarIcon } from './assets/git-diff-toolbar.js'
 import type { DiffFile, DiffFileSummary, DiffLine, DiffRepository, ReviewAnnotation } from '../core/types.js'
@@ -241,9 +243,9 @@ function selectedCode(file: DiffFile, side: 'before' | 'after', pane: HTMLDivEle
 }
 
 export function GitDiffDock(props: GitDiffDockProps) {
-  const { sessionId, useSessions, useInput, inputActions, t } = props
-  const cwd = useSessions(state => sessionId === undefined ? undefined : state.byId[sessionId]?.cwd)
-  const draft = useInput(state => state.draft)
+  const { session, input, inputActions, useSessions, t } = props
+  const cwd = useSessions(state => state.byId[session.sessionId]?.cwd)
+  const draft = input.draft
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -653,6 +655,7 @@ export function GitDiffDock(props: GitDiffDockProps) {
         description={discardTarget === null ? t('discardDescription') : `${discardTarget.path}\n\n${t('discardDescription')}`}
         acknowledgeLabel={t('discardAcknowledge')}
         cancelLabel={t('cancel')}
+        closeLabel={t('close')}
         confirmLabel={discarding ? t('discarding') : t('discardConfirm')}
         acknowledged={discardAcknowledged}
         disabled={discarding}
