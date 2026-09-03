@@ -14,6 +14,16 @@ import { DIFF_ROW_HEIGHT, visibleRowRange } from './virtual-rows.js'
 
 export type GitDiffDockProps = PropsRuntime<'conversation.input.left'> & PropsLocale<'git-diff'>
 
+/**
+ * 0.1.2-alpha.x 宿主以对象形态注入会话与输入状态（session.sessionId / input.draft）；
+ * 0.1.0-rc.7 与 0.1.2-rc.1 直接注入 sessionId 并提供 useInput 选择器。
+ * 兼容层把两种形态归一化，任一形态缺失的成员在类型上保持可选。
+ */
+interface LegacySessionProps {
+  readonly session?: { readonly sessionId?: string | undefined }
+  readonly input?: { readonly draft?: string | undefined }
+}
+
 interface SelectedCode {
   readonly path: string
   readonly side: 'before' | 'after'
@@ -243,9 +253,14 @@ function selectedCode(file: DiffFile, side: 'before' | 'after', pane: HTMLDivEle
 }
 
 export function GitDiffDock(props: GitDiffDockProps) {
-  const { session, input, inputActions, useSessions, t } = props
-  const cwd = useSessions(state => state.byId[session.sessionId]?.cwd)
-  const draft = input.draft
+  const { useSessions, useInput, inputActions, t } = props
+  // 宿主版本决定注入形态（alpha.x 对象形态 / 其他版本选择器形态），同一挂载周期内恒定，
+  // 因此 useInput 的调用模式稳定，不会违反 hook 调用顺序一致性。
+  const legacy = props as LegacySessionProps
+  const sessionId = (legacy.session?.sessionId ?? props.sessionId) as typeof props.sessionId
+  const cwd = useSessions(state => sessionId === undefined ? undefined : state.byId[sessionId]?.cwd)
+  const inputState = useInput !== undefined ? useInput(state => state.draft) : undefined
+  const draft = legacy.input?.draft ?? inputState ?? ''
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
