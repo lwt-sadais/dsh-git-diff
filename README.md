@@ -12,7 +12,7 @@ DeepSeek Harness Web GUI 插件：在聊天输入框内部的左侧工具栏提�
 - 支持选择任意一侧代码内容并添加多条批注
 - 有批注时“发送到会话”按钮高亮；点击只写入当前聊天草稿，不自动发送
 - 支持 modified / added / deleted / renamed / untracked 文件
-- Host 仅允许已注册 DSH workspace，HTTP 路由限制为 loopback、同源 JSON POST
+- Host 仅允许已注册 DSH workspace，HTTP 路由仅接受本机回环地址发出的 JSON POST：浏览器直连时要求 `Origin` 与 `Host` 同源；DSH Desktop 通过 `dsh-app://app` 代理并剥离 `Origin`/`Host`，此时按“回环地址 + JSON”判定
 
 ## 安装
 
